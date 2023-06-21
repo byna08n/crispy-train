@@ -1,0 +1,1370 @@
+using System;
+//using System.Diagnostics;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+
+namespace GravityCurrent3D
+{
+    class Program                                                                       // Computation of 3D Gravity Currents
+    {
+        static void Main(string[] args)
+        {
+            NSSolver NS = new NSSolver();
+        }
+    }
+
+    public class NSSolver                                                               // Navier-Stokes Solver
+    {
+        TimeKeeper TK;
+        private Domain DPS;
+        private Domain DU1;
+        private Domain DU2;
+        private Domain DU3;
+        private Domain DFV;
+        private Domain DPQ;
+        private List<Domain> LD;
+        private List<Domain> LDV;
+        private List<Domain> LDF;
+
+        public NSSolver()
+        {
+            TimeMarching();
+        }
+
+        private void TimeMarching()                                                     // Time Marching
+        {
+            TK = new TimeKeeper();
+            string tX = "Start at " + TK.ST() + "\r\n";
+
+            SetDirectory();
+            CD.Rd();
+            CD.Wt();
+            SetDirectory();
+            tX += CD.WtT();
+            WtT(tX, CD.FC, FileMode.OpenOrCreate);
+            Console.WriteLine(tX);
+
+            MkD();
+            StD();
+            StB();
+
+            if (CD.T0 == 0)
+                StI();
+            else
+                RdB(CD.T0);
+
+            BNS();
+            SurfaceVelocity();
+            string xH = TraceHead(CD.T0);
+
+            WtB(CD.T0);
+            WtT(CD.T0);
+            WtT(xH, CD.FH, FileMode.OpenOrCreate);
+
+            for (int tS = CD.T0 + 1; tS <= CD.T1; tS++)
+            {
+                XDR();
+                Advection();
+                Diffusion();
+                XDV();
+                DivFlux();
+                Gravity();
+                DDV();
+
+                tX = Pressure(tS);
+
+                BNS();
+                SurfaceVelocity();
+
+                xH = TraceHead(tS);
+
+                WtT(xH, CD.FH, FileMode.Append);
+                if (tS % CD.T2 == 0)
+                {
+                    WtB(tS);
+                    WtT(tS);
+                    Rotation();
+                    WtG(tS);
+                }
+
+                tX += "ET =" + "\t" + TK.ET() + "\r\n";
+                Console.Write(tX);
+                WtT(tX, CD.FC, FileMode.Append);
+            }
+            WtB(CD.T1);
+            tX = "End at " + TK.ST() + " Elapsed Time : " + TK.ET() + "\r\n";
+            Console.WriteLine(tX);
+            WtT(tX, CD.FC, FileMode.Append);
+
+        }
+
+        private void MkD()                                                              // Make Domains
+        {
+            DPS = new Domain("DPS");
+            DU1 = new Domain("DU1");
+            DU2 = new Domain("DU2");
+            DU3 = new Domain("DU3");
+            DFV = new Domain("DFV");
+            DPQ = new Domain("DPQ");
+            LD = new List<Domain>();
+            LD.Add(DPS);
+            LD.Add(DU1);
+            LD.Add(DU2);
+            LD.Add(DU3);
+            LD.Add(DFV);
+            LD.Add(DPQ);
+            LDV = new List<Domain>();
+            LDV.Add(DU1);
+            LDV.Add(DU2);
+            LDV.Add(DU3);
+            LDF = new List<Domain>();
+            LDF.Add(DU1);
+            LDF.Add(DU2);
+            LDF.Add(DU3);
+            LDF.Add(DFV);
+            LDF.Add(DPQ);
+        }
+        private void StD()                                                              // Set Domains
+        {
+            for (int i = 0; i < CD.N1 * CD.N2 * CD.N3; i++)
+            {
+                Cell CPS = DPS.LC[i];
+                Cell CU1 = DU1.LC[i];
+                Cell CU2 = DU2.LC[i];
+                Cell CU3 = DU3.LC[i];
+                Cell CFV = DFV.LC[i];
+                Cell CPQ = DPQ.LC[i];
+
+                CPS.CFV = CFV;
+                CPS.CPS = CPS;
+                CPS.CU1 = CU1;
+                CPS.CU2 = CU2;
+                CPS.CU3 = CU3;
+
+                CU1.CFV = CFV;
+                CU1.CPS = CPS;
+                CU1.CU1 = CU1;
+                CU1.CU2 = CU2;
+                CU1.CU3 = CU3;
+
+                CU2.CFV = CFV;
+                CU2.CPS = CPS;
+                CU2.CU1 = CU1;
+                CU2.CU2 = CU2;
+                CU2.CU3 = CU3;
+
+                CU3.CFV = CFV;
+                CU3.CPS = CPS;
+                CU3.CU1 = CU1;
+                CU3.CU2 = CU2;
+                CU3.CU3 = CU3;
+
+                CFV.CPS = CPS;
+                CFV.CU1 = CU1;
+                CFV.CU2 = CU2;
+                CFV.CU3 = CU3;
+                CFV.CFV = CFV;
+
+                CPQ.CPS = CPS;
+                CPQ.CU1 = CU1;
+                CPQ.CU2 = CU2;
+                CPQ.CU3 = CU3;
+                CPQ.CFV = CFV;
+            }
+        }
+
+        private void StI()                                                              // Set Initial Conditions
+        {
+            DFV.ICLE(CD.IS);
+            DPQ.ICLE(CD.IS);
+        }
+
+        private void StB()                                                              // Set Boundary Conditions
+        {
+            DPS.FDC(1, CD.N1 - 1 , 0, CD.N2 - 1, 1 , CD.UW - 1);
+            DPS.FDC(CD.LW + 1,CD.RW - 1, 0, CD.N2 - 1, CD.UW , CD.N3 - 1);　//穴
+            DPS.BNH(CD.UW , CD.UW - 1);
+            DPS.BNH2(0, 1);
+            DPS.BNHH(CD.LW , CD.LW + 1);//ana
+            DPS.BNHH(CD.RW , CD.RW - 1);//ana
+            DPS.BNV(0, 1);
+            DPS.BNV(CD.N1 , CD.N1 - 1);
+            DPS.BNVV(CD.N3, CD.N3 - 1);//ana
+            
+
+            DFV.FDC(1, CD.N1 - 1, 0, CD.N2 - 1, 1, CD.UW - 1);
+            DFV.FDC(CD.LW + 1, CD.RW - 1, 0, CD.N2 - 1, CD.UW , CD.N3 - 1);　//穴
+            DFV.BNH(CD.UW , CD.UW - 1);
+            DFV.BNH2(0, 1);
+            DFV.BNHH(CD.LW , CD.LW + 1);//ana
+            DFV.BNHH(CD.RW , CD.RW - 1);//ana
+            DFV.BNV(0, 1);
+            DFV.BNV(CD.N1 , CD.N1 - 1);
+            DFV.BNVV(CD.N3, CD.N3 - 1);//ana
+
+            DPQ.FDC(1, CD.N1 - 1, 0, CD.N2 - 1, 1, CD.UW - 1);
+            DPQ.FDC(CD.LW + 1, CD.RW - 1, 0, CD.N2 - 1, CD.UW , CD.N3 - 1);　//穴
+            DPQ.BNH(CD.UW , CD.UW - 1);
+            DPQ.BNH2(0, 1);
+            DPQ.BNHH(CD.LW , CD.LW + 1);//ana
+            DPQ.BNHH(CD.RW , CD.RW - 1);//ana
+            DPQ.BNV(0, 1);
+            DPQ.BNV(CD.N1 , CD.N1 - 1);
+            DPQ.BNVV(CD.N3, CD.N3 - 1);//ana
+
+            DU1.FDC(1, CD.N1 - 1, 0, CD.N2 - 1, 1, CD.UW - 1);
+            DU1.FDC(CD.LW + 1, CD.RW - 1, 0, CD.N2 - 1, CD.UW , CD.N3 - 1);　//穴
+            DU1.BNH(CD.UW , CD.UW - 1);
+            DU1.BNH2(0, 1);
+            DU1.BNHH(CD.LW , CD.LW + 1);//ana
+            DU1.BNHH(CD.RW , CD.RW - 1);//ana
+            DU1.BDV(1);
+            DU1.BDV(CD.N1 - 1);
+            DU1.BDVV(CD.LW + 1);
+            DU1.BDVV(CD.RW - 1);
+
+            DU2.FDC(1, CD.N1 - 1, 0, CD.N2 - 1, 1, CD.UW - 1);
+            DU2.FDC(CD.LW + 1, CD.RW - 1, 0, CD.N2 - 1, CD.UW , CD.N3 - 1);　//穴
+            DU2.BNH(CD.UW , CD.UW - 1);
+            DU2.BNH2(0, 1);
+            DU2.BNHH(CD.LW , CD.LW + 1);//ana
+            DU2.BNHH(CD.RW , CD.RW - 1);//ana
+            DU2.BNV(0, 1);
+            DU2.BNV(CD.N1 , CD.N1 - 1);
+            DU2.BNVV(CD.N3, CD.N3 - 1);//ana
+
+            DU3.FDC(1, CD.N1 - 1, 0, CD.N2 - 1, 1, CD.UW - 1);
+            DU3.FDC(CD.LW + 1, CD.RW - 1, 0, CD.N2 - 1, CD.UW , CD.N3 - 1);　//穴
+            DU3.BDH(CD.UW - 1);
+            DU3.BDHH(CD.N3 - 1);//ana
+            DU3.BNV(0, 1);
+            DU3.BNV(CD.N1 , CD.N1 - 1);
+            
+
+        }
+        private void BNS()                                                              // No-Slip Conditions
+        {
+            foreach (Domain d in LDV)
+            {
+                d.BDZR();
+                d.BNNS();
+            }
+            DPS.BNZG();
+            DFV.BNZG();
+            DPQ.BNZG();
+        }
+
+        private void SurfaceVelocity()                                                  // Surface Velocity
+        {
+            foreach (Cell c in DU1.LC)
+            {
+                c.S10.V = (c.CU1.Q + c.CU1.C10.Q) * 0.5;
+                c.S20.V = (c.CU2.Q + c.CU2.C10.Q) * 0.5;
+                c.S30.V = (c.CU3.Q + c.CU3.C10.Q) * 0.5;
+            }
+            foreach (Cell c in DU2.LC)
+            {
+                c.S10.V = (c.CU1.Q + c.CU1.C20.Q) * 0.5;
+                c.S20.V = (c.CU2.Q + c.CU2.C20.Q) * 0.5;
+                c.S30.V = (c.CU3.Q + c.CU3.C20.Q) * 0.5;
+            }
+            foreach (Cell c in DU3.LC)
+            {
+                c.S10.V = (c.CU1.Q + c.CU1.C30.Q) * 0.5;
+                c.S20.V = (c.CU2.Q + c.CU2.C30.Q) * 0.5;
+                c.S30.V = (c.CU3.Q + c.CU3.C30.Q) * 0.5;
+            }
+            foreach (Cell c in DPS.LC)
+            {
+                c.S10.V = c.CU1.Q;
+                c.S20.V = c.CU2.Q;
+                c.S30.V = c.CU3.Q;
+            }
+            foreach (Cell c in DFV.LC)
+            {
+                c.S10.V = c.CU1.Q;
+                c.S20.V = c.CU2.Q;
+                c.S30.V = c.CU3.Q;
+            }
+            foreach (Cell c in DPQ.LC)
+            {
+                c.S10.V = c.CU1.Q;
+                c.S20.V = c.CU2.Q;
+                c.S30.V = c.CU3.Q;
+            }
+        }
+
+        private void Advection()                                                        // Advection
+        {
+            foreach (Domain d in LDF)
+                d.Advection();
+        }
+        private void Diffusion()                                                        // Diffusion
+        {
+            foreach (Domain d in LDV)
+                d.Diffusion(CD.Re);
+            DFV.Diffusion(CD.Rs);
+        }
+        private void DivFlux()                                                          // Divergence of Flux
+        {
+            foreach (Domain d in LDF)
+                d.DivFlux();
+        }
+        private void Gravity()                                                          // Gravity
+        {
+            DU3.Gravity();
+        }
+
+        private void XDR()                                                              // Multiplied by Density
+        {
+            foreach (Cell c in DU1.LC)
+                c.Q *= 1.0 + CD.DR * (c.CFV.Q + c.CFV.C10.Q) * 0.5;
+            foreach (Cell c in DU2.LC)
+                c.Q *= 1.0 + CD.DR * (c.CFV.Q + c.CFV.C20.Q) * 0.5;
+            foreach (Cell c in DU3.LC)
+                c.Q *= 1.0 + CD.DR * (c.CFV.Q + c.CFV.C30.Q) * 0.5;
+        }
+        private void DDR()                                                              // Divided by Density
+        {
+            foreach (Cell c in DU1.LC)
+                c.Q /= 1.0 + CD.DR * (c.CFV.Q + c.CFV.C10.Q) * 0.5;
+            foreach (Cell c in DU2.LC)
+                c.Q /= 1.0 + CD.DR * (c.CFV.Q + c.CFV.C20.Q) * 0.5;
+            foreach (Cell c in DU3.LC)
+                c.Q /= 1.0 + CD.DR * (c.CFV.Q + c.CFV.C30.Q) * 0.5;
+        }
+        private void XDV()                                                              // Multipied by Cell Volume
+        {
+            foreach (Domain d in LD)
+                d.XDV();
+        }
+        private void DDV()                                                              // Divided by Cell Volume
+        {
+            DFV.DDV();
+            DPQ.DDV();
+        }
+
+        private string Pressure(int tS)                                                 // Pressure Solution by Simultaneous Iteration
+        {
+            int iT = 0;
+            double mD = 0.0;
+            for (int it = 0; it < CD.MT; it++)
+            {
+                double aP = 0.0;
+                foreach (Cell c in DPS.LFC)
+                    aP += c.Q;
+                aP /= DPS.LFC.Count;
+
+                foreach (Cell c in DU1.LFC)
+                    c.CU1.Q = (c.CU1.B - (c.CPS.Q - c.C10.CPS.Q) * CD.D2 * CD.D3 * CD.DT) / ((1.0 + CD.DR * (c.CFV.Q + c.CFV.C10.Q) * 0.5) * CD.DV);
+                foreach (Cell c in DU2.LFC)
+                    c.CU2.Q = (c.CU2.B - (c.CPS.Q - c.C20.CPS.Q) * CD.D3 * CD.D1 * CD.DT) / ((1.0 + CD.DR * (c.CFV.Q + c.CFV.C20.Q) * 0.5) * CD.DV);
+                foreach (Cell c in DU3.LFC)
+                    c.CU3.Q = (c.CU3.B - (c.CPS.Q - c.C30.CPS.Q) * CD.D1 * CD.D2 * CD.DT) / ((1.0 + CD.DR * (c.CFV.Q + c.CFV.C30.Q) * 0.5) * CD.DV);
+                foreach (Cell c in DPS.LFC)
+                {
+                    c.B = (c.CU1.C11.Q - c.CU1.Q) / CD.D1 + (c.CU2.C21.Q - c.CU2.Q) / CD.D2 + (c.CU3.C31.Q - c.CU3.Q) / CD.D3;
+                    c.Q -= CD.DM * c.B * (1 + CD.DR * c.CFV.Q) + aP;
+                }
+
+                iT = it;
+                mD = 0.0;
+
+                foreach (Cell c in DPS.LFC)
+                {
+                    double d = Math.Abs(c.B);
+                    if (d > mD)
+                        mD = d;
+                }
+                if (mD < CD.ED) break;
+            }
+
+            mD = 0.0;
+            int i1M = 0;
+            int i2M = 0;
+            int i3M = 0;
+
+            for (int i1 = 1; i1 < CD.N1 - 1; i1++)
+                for (int i2 = 0; i2 < CD.N2; i2++)
+                    for (int i3 = 1; i3 < CD.N3 - 1; i3++)
+                    {  
+                    
+                        double d = Math.Abs(DPS.LC[DPS.I(i1, i2, i3)].B);
+                        if (d > mD)
+                        {
+                            mD = d;
+                            i1M = i1;
+                            i2M = i2;
+                            i3M = i3;
+                        }
+                    }
+          
+
+            string s
+                = "TS =" + "\t" + String.Format("{0,5:D}", tS) + "\t"
+                + "IT =" + "\t" + String.Format("{0,5:D}", iT) + "\t"
+                + "MD =" + "\t" + String.Format("{0,5:E2}", mD) + "\t"
+                + "I1 =" + "\t" + String.Format("{0,5:D}", i1M) + "\t"
+                + "I2 =" + "\t" + String.Format("{0,5:D}", i2M) + "\t"
+                + "I3 =" + "\t" + String.Format("{0,5:D}", i3M) + "\t";
+            return s;
+        }
+
+        private void Rotation()                                                         // Rotation
+        {
+            foreach (Cell c in DU1.LC)
+                c.B = (c.CU3.Q - c.CU3.C20.Q) / CD.D2 - (c.CU2.Q - c.CU2.C30.Q) / CD.D3;
+            foreach (Cell c in DU2.LC)
+                c.B = (c.CU1.Q - c.CU1.C30.Q) / CD.D3 - (c.CU3.Q - c.CU3.C10.Q) / CD.D1;
+            foreach (Cell c in DU3.LC)
+                c.B = (c.CU2.Q - c.CU2.C10.Q) / CD.D1 - (c.CU1.Q - c.CU1.C20.Q) / CD.D2;
+        }
+
+        private string TraceHead(int tS)                                                // Trace Head of Gravity Currents
+        {
+            double q = 0.0;
+            double xR = 0.0;
+            double xL = 0.0;
+
+            for (int i1 = 1; i1 < CD.N1 - 1; i1++)
+                for (int i2 = 0; i2 < CD.N2; i2++)
+                    for (int i3 = 1; i3 < CD.N3 - 1; i3++)
+                    {
+                       
+                        Cell c = DPQ.LC[DPQ.I(i1, i2, i3)];
+                        if (((c.Q <= q) && (q < c.C11.Q)) || ((c.Q >= q) && (q > c.C11.Q)))
+                        {
+                            double x = Convert.ToDouble(i1 - CD.IS) + (q - c.Q) / (c.C11.Q - c.Q) + 0.5;
+                            xL = Math.Min(x, xL);
+                            xR = Math.Max(x, xR);
+                        }
+                    }
+
+            string s
+                = "TS =" + "\t" + String.Format("{0,5:D}", tS) + "\t"
+                + "XL =" + "\t" + String.Format("{0,5:E2}", xL) + "\t"
+                + "XR =" + "\t" + String.Format("{0,5:E2}", xR) + "\r\n";
+            return s;
+        }
+
+        private void SetDirectory()                                                     // Create and Set Directory
+        {
+            string dN = "C:\\Work\\GravityCurrent3D\\" + CD.CN;
+            if (!Directory.Exists(dN)) Directory.CreateDirectory(dN);
+            Directory.SetCurrentDirectory(dN);
+        }
+        private void WtT(string tX, string fN, FileMode fileMode)                       // Write Text to File
+        {
+            FileStream fs = new FileStream(fN, fileMode);
+            StreamWriter sw = new StreamWriter(fs, Encoding.Default);
+            sw.Write(tX);
+            sw.Close();
+            fs.Close();
+        }
+        private void WtB(int tS)                                                        // Write Binary Data to Continue
+        {
+            foreach (Domain d in LD)
+                d.WtB(tS);
+
+        }
+        private void RdB(int ts)                                                        // Read Binary Date to Continue
+        {
+            foreach (Domain d in LD)
+                d.RdB(ts);
+        }
+        private void WtT(int tS)                                                        // Write Text Data
+        {
+            foreach (Domain d in LD)
+                d.WtT(tS);
+        }
+        private void WtG(int tS)                                                        // Write Data of Each Grids
+        {
+            DU1.WtG("U1", tS);
+            DU2.WtG("U2", tS);
+            DU3.WtG("U3", tS);
+            DPS.WtG("PS", tS);
+            DFV.WtG("FV", tS);
+            DPQ.WtG("PQ", tS);
+            DU1.WtG("W1", tS);
+            DU2.WtG("W2", tS);
+            DU3.WtG("W3", tS);
+        }
+    }
+
+    public static class CD                                                              // Conditions for Computation
+    {
+        public static string CN;
+        public static int LW; //穴の左壁
+        public static int RW; //穴の右壁
+        public static int UW; //穴の深さ(z)
+        public static int N1;
+        public static int N2;
+        public static int N3;
+        public static int T0;
+        public static int T1;
+        public static int T2;
+        public static double D1;
+        public static double D2;
+        public static double D3;
+        public static double DT;
+        public static double Re;
+        public static double Rs;
+        public static double Fn;
+        public static double DR;
+        public static string SH;
+        public static int IS;
+        public static int IH;
+
+        public static void Rd()                                     // Read CD
+        {
+            try
+            {
+                string fN = "InputData.txt";
+                FileStream fs = new FileStream(fN, FileMode.Open);
+                StreamReader sr = new StreamReader(fs, Encoding.Default);
+                RdS(sr);
+                sr.Close();
+                fs.Close();
+            }
+            catch (FileNotFoundException)
+            {
+                Console.WriteLine("The inputfile in the directory cannot be found.");
+                St();
+            }
+            StC();
+        }
+        private static void RdS(StreamReader sr)                    // Read from Stream
+        {
+            CvS(sr);
+            CN = "GC3D" + DateTime.Now.ToString("yyyyMMddhhmmss");
+            LW = CvI(sr);
+            RW = CvI(sr);
+            UW = CvI(sr);
+            N1 = CvI(sr);
+            N2 = CvI(sr);
+            N3 = CvI(sr);
+            T0 = CvI(sr);
+            T1 = CvI(sr);
+            T2 = CvI(sr);
+            D1 = CvD(sr);
+            D2 = CvD(sr);
+            D3 = CvD(sr);
+            DT = CvD(sr);
+            Re = CvD(sr);
+            Rs = CvD(sr);
+            Fn = CvD(sr);
+            DR = CvD(sr);
+            SH = CvS(sr);
+            IS = CvI(sr);
+            IH = CvI(sr);
+        }
+        private static string CvS(StreamReader sr)                  // Convert to String
+        {
+            string s = sr.ReadLine();
+            string[] sA = s.Split('\t');
+            return sA[1];
+        }
+        private static int CvI(StreamReader sr)                     // Convert to Int
+        {
+            string s = sr.ReadLine();
+            string[] sA = s.Split('\t');
+            int i = Convert.ToInt32(sA[1]);
+            return i;
+        }
+        private static double CvD(StreamReader sr)                  // Convert to Double
+        {
+            string s = sr.ReadLine();
+            string[] sA = s.Split('\t');
+            double x = Convert.ToDouble(sA[1]);
+            return x;
+        }
+
+        private static void St()                                     // Set CD
+        {
+            CN = "GC3D" + DateTime.Now.ToString("yyyyMMddHHmmss");
+            int n1 = 100;
+            int n2 = 1;
+            int n3 = 20;
+            int lw = 35;
+            int rw = 45;
+            int uw = 15;
+            N1 = n1 ;
+            N2 = n2;
+            N3 = n3 ;
+            LW = lw;
+            RW = rw ; 
+            UW = uw ;
+            T0 = 0;
+            T1 = 2000;
+            T2 = T1 / 10;
+            D2 = 1.0 / n2;
+            D3 = 1.0 / n3;
+            D1 = D3;
+            DT = D1 / 10;
+            Re = 100.0;
+            Rs = Re * 100.0;
+            Fn = 1.0;
+            DR = 0.01;
+            SH = "Upwind2";
+            IS = N1 / 2;
+            IH = N3 / 2;
+        }
+
+        public static void Wt()                                     // Write CD
+        {
+            string fN = "InputData" + CN + ".txt";
+            FileStream fs = new FileStream(fN, FileMode.Create);
+            StreamWriter sw = new StreamWriter(fs, Encoding.Default);
+            sw.Write(WtT());
+            sw.Close();
+            fs.Close();
+        }
+        public static string WtT()                                  // Write to Text
+        {
+            string s
+                = "No =" + "\t" + CN + "\r\n"
+                + "N1 =" + "\t" + String.Format("{0,5:D}", N1) + "\r\n"
+                + "N2 =" + "\t" + String.Format("{0,5:D}", N2) + "\r\n"
+                + "N3 =" + "\t" + String.Format("{0,5:D}", N3) + "\r\n"
+                + "LW =" + "\t" + String.Format("{0,5:D}", LW) + "\r\n" //穴
+                + "RW =" + "\t" + String.Format("{0,5:D}", RW) + "\r\n" //穴
+                + "UW =" + "\t" + String.Format("{0,5:D}", UW) + "\r\n" //穴
+                + "T0 =" + "\t" + String.Format("{0,5:D}", T0) + "\r\n"
+                + "T1 =" + "\t" + String.Format("{0,5:D}", T1) + "\r\n"
+                + "T2 =" + "\t" + String.Format("{0,5:D}", T2) + "\r\n"
+                + "D1 =" + "\t" + String.Format("{0,5:F3}", D1) + "\r\n"
+                + "D2 =" + "\t" + String.Format("{0,5:F3}", D2) + "\r\n"
+                + "D3 =" + "\t" + String.Format("{0,5:F3}", D3) + "\r\n"
+                + "DT =" + "\t" + String.Format("{0,5:F3}", DT) + "\r\n"
+                + "Re =" + "\t" + String.Format("{0,5:G2}", Re) + "\r\n"
+                + "Rs =" + "\t" + String.Format("{0,5:G2}", Rs) + "\r\n"
+                + "Fn =" + "\t" + String.Format("{0,5:F1}", Fn) + "\r\n"
+                + "DR =" + "\t" + String.Format("{0,5:F3}", DR) + "\r\n"
+                + "SH =" + "\t" + SH + "\r\n"
+                + "IS =" + "\t" + String.Format("{0,5:D}", IS) + "\r\n"
+                + "IH =" + "\t" + String.Format("{0,5:D}", IH) + "\r\n";
+            return s;
+        }
+
+        public static double DV;
+        public static double ED;
+        public static int MT;
+        public static double RF;
+        public static double DM;
+        public static string FC;
+        public static string FH;
+
+        private static void StC()                                   // Set Constans
+        {
+            DV = D1 * D2 * D3;
+            ED = 0.0001;
+            MT = 30;
+            RF = 0.8;
+            DM = RF / (2.0 * DT * (1.0 / (D1 * D1) + 1.0 / (D2 * D2) + 1.0 / (D3 * D3)));
+            FC = "Condition" + CN + ".txt";
+            FH = "Head" + CN + ".txt";
+        }
+    }
+
+    public class Domain
+    {
+        public string ND;
+        public int N1;
+        public int N2;
+        public int N3;
+        public int LW; //壁
+        public int RW; //壁
+        public int UW; //壁
+        public List<Cell> LC;
+        public List<Cell> LFC;
+        public List<DBoundary> LDBC;
+        public List<NBoundary> LNBC;
+        public int I(int i1, int i2, int i3) //配列を決めている（割り振っている）？
+        {
+            i1 = (i1 + N1) % N1; 
+            i2 = (i2 + N2) % N2;
+            i3 = (i3 + N3) % N3;
+            return (i1 * N2 + i2) * N3 + i3;
+        }
+
+        public Domain(string n)
+        {
+            ND = n;
+            N1 = CD.N1;
+            N2 = CD.N2;
+            N3 = CD.N3;
+            LW = CD.LW;
+            RW = CD.RW;
+            UW = CD.UW;
+
+            MkC();
+            StD();
+        }
+        private void MkC()                                                               // Make Cells
+        {
+            LC = new List<Cell>();
+            for (int i1 = 0; i1 < N1; i1++)
+                for (int i2 = 0; i2 < N2; i2++)
+                    for (int i3 = 0; i3 < N3; i3++)
+                    { 
+                        Cell c = new Cell();
+                        c.S10 = new Surface();
+                        c.S20 = new Surface();
+                        c.S30 = new Surface();
+                        LC.Add(c);
+                    }
+
+          
+            LFC = new List<Cell>();
+            LDBC = new List<DBoundary>();
+            LNBC = new List<NBoundary>();
+        }
+        private void StD()                                                               // Set Domain
+        {
+            for (int i1 = 0; i1 < N1; i1++)
+                for (int i2 = 0; i2 < N2; i2++)
+                    for (int i3 = 0; i3 < N3; i3++)
+                    {
+                        Cell c = LC[I(i1, i2, i3)];
+                        c.C10 = LC[I(i1 - 1, i2, i3)];
+                        c.C11 = LC[I(i1 + 1, i2, i3)];
+                        c.C20 = LC[I(i1, i2 - 1, i3)];
+                        c.C21 = LC[I(i1, i2 + 1, i3)];
+                        c.C30 = LC[I(i1, i2, i3 - 1)];
+                        c.C31 = LC[I(i1, i2, i3 + 1)];
+                    }
+          
+            foreach (Cell c in LC)
+            {
+                c.S11 = c.C11.S10;
+                c.S21 = c.C21.S20;
+                c.S31 = c.C31.S30;
+            }
+        }
+
+        public void Advection()
+        {
+            switch (CD.SH)
+            {
+                case "Centred2":
+                    Centred2();
+                    break;
+                case "Upwind1":
+                    Upwind1();
+                    break;
+                case "Quick":
+                    QUIC();
+                    break;
+                case "Upwind2":
+                    Upwind2();
+                    break;
+            }
+        }
+        private void Centred2()
+        {
+            foreach (Cell c in LC)
+            {
+                c.S10.F = c.S10.V * (c.Q + c.C10.Q) * 0.5;
+                c.S20.F = c.S20.V * (c.Q + c.C20.Q) * 0.5;
+                c.S30.F = c.S30.V * (c.Q + c.C30.Q) * 0.5;
+            }
+        }
+        private void Upwind1()
+        {
+            Centred2();
+            foreach (Cell c in LC)
+            {
+                c.S10.F -= Math.Abs(c.S10.V) * (c.Q - c.C10.Q) * 0.5;
+                c.S20.F -= Math.Abs(c.S20.V) * (c.Q - c.C20.Q) * 0.5;
+                c.S30.F -= Math.Abs(c.S30.V) * (c.Q - c.C30.Q) * 0.5;
+            }
+        }
+        private void QUIC()
+        {
+            foreach (Cell c in LC)
+            {
+                c.S10.F = (c.S10.V * (-c.C11.Q + 9.0 * c.Q + 9.0 * c.C10.Q - c.C10.C10.Q)
+                    - Math.Abs(c.S10.V) * (c.C11.Q + 3.0 * c.Q - 3.0 * c.C10.Q - c.C10.C10.Q)) / 16.0;
+                c.S20.F = (c.S20.V * (-c.C21.Q + 9.0 * c.Q + 9.0 * c.C20.Q - c.C20.C20.Q)
+                    - Math.Abs(c.S20.V) * (c.C21.Q + 3.0 * c.Q - 3.0 * c.C20.Q - c.C20.C20.Q)) / 16.0;
+                c.S30.F = (c.S30.V * (-c.C31.Q + 9.0 * c.Q + 9.0 * c.C30.Q - c.C30.C30.Q)
+                    - Math.Abs(c.S30.V) * (c.C31.Q + 3.0 * c.Q - 3.0 * c.C30.Q - c.C30.C30.Q)) / 16.0;
+            }
+        }
+        private void Upwind2()
+        {
+            foreach (Cell c in LC)
+            {
+                if (c.S10.V >= 0.0)
+                    c.S10.F = c.S10.V * (c.C10.Q + (c.Q - c.C10.C10.Q) * (CD.D1 - c.S10.V * CD.DT) * 0.25 / CD.D1);
+                else
+                    c.S10.F = c.S10.V * (c.Q - (c.C11.Q - c.C10.Q) * (CD.D1 + c.S10.V * CD.DT) * 0.25 / CD.D1);
+                if (c.S20.V >= 0.0)
+                    c.S20.F = c.S20.V * (c.C20.Q + (c.Q - c.C20.C20.Q) * (CD.D2 - c.S20.V * CD.DT) * 0.25 / CD.D2);
+                else
+                    c.S20.F = c.S20.V * (c.Q - (c.C21.Q - c.C20.Q) * (CD.D2 + c.S20.V * CD.DT) * 0.25 / CD.D2);
+                if (c.S30.V >= 0.0)
+                    c.S30.F = c.S30.V * (c.C30.Q + (c.Q - c.C30.C30.Q) * (CD.D3 - c.S30.V * CD.DT) * 0.25 / CD.D3);
+                else
+                    c.S30.F = c.S30.V * (c.Q - (c.C31.Q - c.C30.Q) * (CD.D3 + c.S30.V * CD.DT) * 0.25 / CD.D3);
+            }
+        }
+        public void Diffusion(double R)
+        {
+            foreach (Cell c in LC)
+            {
+                c.S10.F -= (c.Q - c.C10.Q) / (CD.D1 * R);
+                c.S20.F -= (c.Q - c.C20.Q) / (CD.D2 * R);
+                c.S30.F -= (c.Q - c.C30.Q) / (CD.D3 * R);
+            }
+        }
+        public void DivFlux()
+        {
+            foreach (Cell c in LC)
+            {
+                c.S10.F *= CD.D2 * CD.D3 * CD.DT;
+                c.S20.F *= CD.D3 * CD.D1 * CD.DT;
+                c.S30.F *= CD.D1 * CD.D2 * CD.DT;
+            }
+            foreach (Cell c in LC)
+                c.B -= c.S11.F - c.S10.F + c.S21.F - c.S20.F + c.S31.F - c.S30.F;
+        }
+        public void Gravity()
+        {
+            foreach (Cell c in LC)
+                c.B -= 0.5 * (c.CFV.Q + c.CFV.C30.Q) * CD.DV * CD.DT / (CD.Fn * CD.Fn);
+        }
+        public void XDV()
+        {
+            foreach (Cell c in LC)
+                c.B = c.Q * CD.DV;
+        }
+        public void DDV()
+        {
+            foreach (Cell c in LC)
+                c.Q = c.B / CD.DV;
+        }
+
+        public void WtB(int tS)                                                         // Write Binary Data
+        {
+            string fN = ND + tS.ToString("D5") + ".nsb";
+            FileStream fS = new FileStream(fN, FileMode.Create);
+            BinaryWriter bW = new BinaryWriter(fS);
+            bW.Write(CD.CN);
+            bW.Write(ND);
+            bW.Write(tS);
+            bW.Write(N1);
+            bW.Write(N2);
+            bW.Write(N3);
+            bW.Write(LW);//ana
+            bW.Write(RW);//ana
+            bW.Write(UW);//ana
+            foreach (Cell c in LC)
+                bW.Write(c.Q);
+            bW.Close();
+            fS.Close();
+        }
+        public void RdB(int tS)                                                         // Read Bonary Data
+        {
+            string fN = ND + tS.ToString("D5") + ".nsb";
+            FileStream fS = new FileStream(fN, FileMode.Open);
+            BinaryReader bR = new BinaryReader(fS);
+            string cN = bR.ReadString();
+            ND = bR.ReadString();
+            tS = bR.ReadInt32();
+            N1 = bR.ReadInt32();
+            N2 = bR.ReadInt32();
+            N3 = bR.ReadInt32();
+            LW = bR.ReadInt32();
+            RW = bR.ReadInt32();
+            UW = bR.ReadInt32();
+            MkC();
+            StD();
+            foreach (Cell c in LC)
+                c.Q = bR.ReadDouble();
+            bR.Close();
+            fS.Close();
+        }
+        public void WtT(int tS)                                                         // Write Text Data to Stream
+        {
+            string s = "No =" + "\t" + CD.CN + "\r\n";
+            s += "ND =" + "\t" + ND + "\r\n";
+            s += "tS =" + "\t" + String.Format("{0,5:D}", tS) + "\r\n";
+            s += "N1 =" + "\t" + String.Format("{0,5:D}", N1) + "\r\n";
+            s += "N2 =" + "\t" + String.Format("{0,5:D}", N2) + "\r\n";
+            s += "N3 =" + "\t" + String.Format("{0,5:D}", N3) + "\r\n";
+            s += "LW =" + "\t" + String.Format("{0,5:D}", LW) + "\r\n";
+            s += "RW =" + "\t" + String.Format("{0,5:D}", RW) + "\r\n";
+            s += "UW =" + "\t" + String.Format("{0,5:D}", UW) + "\r\n";
+            StringBuilder sb;
+            for (int i2 = 0; i2 < N2; i2++)
+                for (int i3 = 0; i3 < N3; i3++)
+                {
+                    sb = new StringBuilder(N1 * 7);
+                    for (int i1 = 0; i1 < N1; i1++)
+                        sb = sb.AppendFormat("{0,10:E}\t", LC[I(i1, i2, i3)].Q);
+                    s += sb.ToString(0, sb.Length - 1) + "\r\n";
+                }
+            string fN = ND + tS.ToString("D5") + ".txt";
+            FileStream fs = new FileStream(fN, FileMode.Create);
+            StreamWriter sw = new StreamWriter(fs, Encoding.Default);
+            sw.Write(s);
+            sw.Close();
+            fs.Close();
+        }
+        public void RdT(int tS)                                                         // Read Text data from Stream
+        {
+            string fN = ND + tS.ToString("D5") + ".txt";
+            FileStream fS = new FileStream(fN, FileMode.Open);
+            StreamReader sR = new StreamReader(fS, Encoding.Default);
+
+            string n0 = CvS(sR);
+            string nD = CvS(sR);
+            int ts = CvI(sR);
+            int n1 = CvI(sR);
+            int n2 = CvI(sR);
+            int n3 = CvI(sR);
+            MkC();
+            StD();
+            string[] sA;
+            for (int i2 = 0; i2 < N2; i2++)
+                for (int i3 = 0; i3 < N3; i3++)
+                {
+                    sA = sR.ReadLine().Split('\t');
+                    for (int i1 = 0; i1 < N1; i1++)
+                        LC[I(i1, i2, i3)].Q = Convert.ToDouble(sA[i1]);
+                }
+
+            sR.Close();
+            fS.Close();
+        }
+
+        public void WtG(string nG, int tS)                                              // Write Date at Grids
+        {
+            int n1 = CD.N1 - 1;
+            int n2 = CD.N2 + 1;
+            int n3 = CD.N3 - 1;
+            double[,,] g = new double[n1, n2, n3];
+            AvG(nG, n1, n2, n3, g);
+            WtB(nG, tS, n1, n2, n3, g);
+            WtT(nG, tS, n1, n2, n3, g);
+        }
+        private void AvG(string nG, int n1, int n2, int n3, double[,,] g)               // Average at Grids
+        {
+            switch (nG)
+            {
+                case "PS":
+                case "FV":
+                case "PQ":
+                    for (int i1 = 0; i1 < n1; i1++)
+                        for (int i2 = 0; i2 < n2; i2++)
+                            for (int i3 = 0; i3 < n3; i3++)
+                            {
+                                Cell c = LC[I(i1 + 1, i2, i3 + 1)];
+                                g[i1, i2, i3] = (c.Q + c.C10.Q + c.C20.Q + c.C30.Q + c.C20.C30.Q + c.C30.C10.Q + c.C10.C20.Q + c.C10.C20.C30.Q) / 8.0;
+                            }
+                    break;
+                case "U1":
+                    for (int i1 = 0; i1 < n1; i1++)
+                        for (int i2 = 0; i2 < n2; i2++)
+                            for (int i3 = 0; i3 < n3; i3++)
+                            {
+                                Cell c = LC[I(i1 + 1, i2, i3 + 1)];
+                                g[i1, i2, i3] = (c.Q + c.C20.Q + c.C30.Q + c.C20.C30.Q) / 4.0;
+                            }
+                    break;
+                case "U2":
+                    for (int i1 = 0; i1 < n1; i1++)
+                        for (int i2 = 0; i2 < n2; i2++)
+                            for (int i3 = 0; i3 < n3; i3++)
+                            {
+                                Cell c = LC[I(i1 + 1, i2, i3 + 1)];
+                                g[i1, i2, i3] = (c.Q + c.C30.Q + c.C10.Q + c.C30.C10.Q) / 4.0;
+                            }
+                    break;
+                case "U3":
+                    for (int i1 = 0; i1 < n1; i1++)
+                        for (int i2 = 0; i2 < n2; i2++)
+                            for (int i3 = 0; i3 < n3; i3++)
+                            {
+                                Cell c = LC[I(i1 + 1, i2, i3 + 1)];
+                                g[i1, i2, i3] = (c.Q + c.C10.Q + c.C20.Q + c.C10.C20.Q) / 4.0;
+                            }
+                    break;
+                case "W1":
+                    for (int i1 = 0; i1 < n1; i1++)
+                        for (int i2 = 0; i2 < n2; i2++)
+                            for (int i3 = 0; i3 < n3; i3++)
+                            {
+                                Cell c = LC[I(i1 + 1, i2, i3 + 1)];
+                                g[i1, i2, i3] = (c.B + c.C10.B) * 0.5;
+                            }
+                    break;
+                case "W2":
+                    for (int i1 = 0; i1 < n1; i1++)
+                        for (int i2 = 0; i2 < n2; i2++)
+                            for (int i3 = 0; i3 < n3; i3++)
+                            {
+                                Cell c = LC[I(i1 + 1, i2, i3 + 1)];
+                                g[i1, i2, i3] = (c.B + c.C20.B) * 0.5;
+                            }
+                    break;
+                case "W3":
+                    for (int i1 = 0; i1 < n1; i1++)
+                        for (int i2 = 0; i2 < n2; i2++)
+                            for (int i3 = 0; i3 < n3; i3++)
+                            {
+                                Cell c = LC[I(i1 + 1, i2, i3 + 1)];
+                                g[i1, i2, i3] = (c.B + c.C30.B) * 0.5;
+                            }
+                    break;
+            }
+        }
+        private void WtB(string nG, int tS, int n1, int n2, int n3, double[,,] g)       // Write Binary Data at Grids
+        {
+            string fN = nG + tS.ToString("D5") + ".nsg";
+            FileStream fS = new FileStream(fN, FileMode.Create);
+            BinaryWriter bW = new BinaryWriter(fS);
+            bW.Write(CD.CN);
+            bW.Write(nG);
+            bW.Write(tS);
+            bW.Write(n1);
+            bW.Write(n2);
+            bW.Write(n3);
+           
+      
+            for (int i1 = 0; i1 < n1; i1++)
+                for (int i2 = 0; i2 < n2; i2++)
+                    for (int i3 = 0; i3 < n3; i3++)
+                        bW.Write(g[i1, i2, i3]);
+            bW.Close();
+            fS.Close();
+        }
+        private double[,,] RdB(string nG, int tS)                                       // Read Binary Data
+        {
+            string fN = nG + String.Format("{0,5:D}", tS) + ".nsg";
+            FileStream fS = new FileStream(fN, FileMode.Open);
+            BinaryReader bR = new BinaryReader(fS);
+            string n0 = bR.ReadString();
+            string ng = bR.ReadString();
+            int ts = bR.ReadInt32();
+            int n1 = bR.ReadInt32();
+            int n2 = bR.ReadInt32();
+            int n3 = bR.ReadInt32();
+            double[,,] g = new double[n1, n2, n3];
+            for (int i1 = 0; i1 < n1; i1++)
+                for (int i2 = 0; i2 < n2; i2++)
+                    for (int i3 = 0; i3 < n3; i3++)
+                        g[i1, i2, i3] = bR.ReadDouble();
+            bR.Close();
+            fS.Close();
+            return g;
+        }
+        private void WtT(string nG, int tS, int n1, int n2, int n3, double[,,] g)       // Write Text Data at Grids
+        {
+            string s = "No =" + "\t" + CD.CN + "\r\n";
+            s += "nG =" + "\t" + nG + "\r\n";
+            s += "tS =" + "\t" + String.Format("{0,5:D}", tS) + "\r\n";
+            s += "n1 =" + "\t" + String.Format("{0,5:D}", n1) + "\r\n";
+            s += "n2 =" + "\t" + String.Format("{0,5:D}", n2) + "\r\n";
+            s += "n3 =" + "\t" + String.Format("{0,5:D}", n3) + "\r\n";
+            StringBuilder sB;
+            for (int i2 = 0; i2 < n2; i2++)
+                for (int i3 = 0; i3 < n3; i3++)
+                {
+                    sB = new StringBuilder(n1 * 7);
+                    for (int i1 = 0; i1 < n1; i1++)
+                        sB = sB.AppendFormat("{0,10:E}\t", g[i1, i2, i3]);
+                    s += sB.ToString(0, sB.Length - 1) + "\r\n";
+                }
+            string fN = nG + tS.ToString("D5") + ".txt";
+            FileStream fS = new FileStream(fN, FileMode.Create);
+            StreamWriter sW = new StreamWriter(fS, Encoding.Default);
+            sW.Write(s);
+            sW.Close();
+            fS.Close();
+        }
+        private double[,,] RdT(string nG, int tS)                                       // Read Text data at Grids
+        {
+            string fN = nG + tS.ToString("D5") + ".txt";
+            FileStream fS = new FileStream(fN, FileMode.Open);
+            StreamReader sR = new StreamReader(fS, Encoding.Default);
+            string n0 = CvS(sR);
+            string ng = CvS(sR);
+            int ts = CvI(sR);
+            int n1 = CvI(sR);
+            int n2 = CvI(sR);
+            int n3 = CvI(sR);
+            double[,,] g = new double[n1, n2, n3];
+            string[] sA;
+            for (int i2 = 0; i2 < n2; i2++)
+                for (int i3 = 0; i3 < n3; i3++)
+                {
+                    sA = sR.ReadLine().Split('\t');
+                    for (int i1 = 0; i1 < n1; i1++)
+                        g[i1, i2, i3] = Convert.ToDouble(sA[i1]);
+                }
+            sR.Close();
+            fS.Close();
+            return g;
+        }
+        private static string CvS(StreamReader sR)                                      // Convert to String
+        {
+            string s = sR.ReadLine();
+            string[] sA = s.Split('\t');
+            return sA[1];
+        }
+        private static int CvI(StreamReader sR)                                         // Convert to Int
+        {
+            string s = sR.ReadLine();
+            string[] sA = s.Split('\t');
+            int i = Convert.ToInt32(sA[1]);
+            return i;
+        }
+        private static double CvD(StreamReader sR)                                      // Convert to Double
+        {
+            string s = sR.ReadLine();
+            string[] sA = s.Split('\t');
+            double x = Convert.ToDouble(sA[1]);
+            return x;
+        }
+
+        public void FDC(int i10, int i11, int i20, int i21, int i30, int i31)           // 〇Fluid Cells
+        {
+            for (int i1 = i10; i1 <= i11; i1++)
+                for (int i2 = i20; i2 <= i21; i2++)
+                    for (int i3 = i30; i3 <= i31; i3++)
+                    
+                        LFC.Add(LC[I(i1, i2, i3)]);
+        }
+
+       
+        public void BDH(int i30)                                                        // 〇Dirichlet Horizontal Boundary
+        {
+            for (int i2 = 0; i2 < N2; i2++)
+                for (int i1 = 0; i1 < N1; i1++)
+                {  if (i1 >= LW + 1 && i1 < RW)
+                        continue;
+                    DBoundary bD = new DBoundary();
+                    bD.CD = LC[I(i1, i2, i30)];
+                    LDBC.Add(bD);
+                }
+        }
+        public void BDHH(int i30)                                                        //〇 Dirichlet Horizontal Boundary
+        {
+            for (int i2 = 0; i2 < N2; i2++)
+                for (int i1 = LW + 1; i1 < RW; i1++)
+                {
+                    DBoundary bD = new DBoundary();
+                    bD.CD = LC[I(i1, i2, i30)];
+                    LDBC.Add(bD);
+                }
+        }
+        public void BDV(int i10)                                                        // 〇Dirichlet Vertical Boundary
+        {
+            for (int i2 = 0; i2 < N2; i2++)
+                for (int i3 = 0; i3 < N3; i3++)
+                {
+                    DBoundary bD = new DBoundary();
+                    bD.CD = LC[I(i10, i2, i3)];
+                    LDBC.Add(bD);
+                }
+        }
+        public void BDVV(int i10)                                                        //〇 Dirichlet Vertical Boundary
+        {
+            for (int i2 = 0; i2 < N2; i2++)
+                for (int i3 = UW; i3 < N3; i3++)
+                {
+                    DBoundary bD = new DBoundary();
+                    bD.CD = LC[I(i10, i2, i3)];
+                    LDBC.Add(bD);
+                }
+        }
+        public void BNH(int i3B, int i3F)                                               // ☆〇Neumann Horizontal Boundary
+        {
+            for (int i2 = 0; i2 < N2; i2++)
+                for (int i1 = 0; i1 < N1; i1++)
+                {  if (i1 >= LW + 1 && i1 < RW) //LW～RW部分の壁取っ払う
+                        continue;
+                    NBoundary bN = new NBoundary();
+                    bN.CB = LC[I(i1, i2, i3B)];
+                    bN.CF = LC[I(i1, i2, i3F)];
+                    LNBC.Add(bN);
+                }
+        }
+        public void BNH2(int i3B, int i3F)                                               // ☆〇Neumann Horizontal Boundary
+        {
+            for (int i2 = 0; i2 < N2; i2++)
+                for (int i1 = 0; i1 < N1; i1++)
+                {
+                    
+                    NBoundary bN = new NBoundary();
+                    bN.CB = LC[I(i1, i2, i3B)];
+                    bN.CF = LC[I(i1, i2, i3F)];
+                    LNBC.Add(bN);
+                }
+        }
+        public void BNHH (int i1X, int i1Y)                      //〇
+        {
+                for (int i2 = 0 ; i2 < N2; i2++)
+                    for (int i3 = UW; i3 < N3; i3++)
+                    {
+                        NBoundary bN = new NBoundary();
+                        bN.CB = LC[I(i1X, i2, i3)];
+                        bN.CF = LC[I(i1Y, i2, i3)];
+                        LNBC.Add(bN);
+                    }
+        }
+        public void BNV(int i1B, int i1F)                                               // 〇Neumann Vertical Boundary
+        {
+            for (int i2 = 0; i2 < N2; i2++)
+                for (int i3 = 0; i3 < UW; i3++)
+                {
+                    NBoundary bN = new NBoundary();
+                    bN.CB = LC[I(i1B, i2, i3)];
+                    bN.CF = LC[I(i1F, i2, i3)];
+                    LNBC.Add(bN);
+                }
+        }
+        public void BNVV(int i3B, int i3F)                                               // 〇Neumann Vertical Boundary
+        {
+            for (int i1 = LW + 1; i1 < RW; i1++)
+            for (int i2 = 0; i2 < N2; i2++) 
+            {
+                NBoundary bN = new NBoundary();
+                bN.CB = LC[I(i1, i2, i3B)];
+                bN.CF = LC[I(i1, i2, i3F)];
+                    LNBC.Add(bN);
+                }
+        }
+                    public void BDZR()                                                              // Dirichlet Boundary Condition Fixed at Zero 
+        {
+            foreach (DBoundary bD in LDBC)
+                bD.CD.Q = 0.0;
+        }
+        public void BNNS()                                                              // Neumann Boundary Condition for No-Slip
+        {
+            foreach (NBoundary bN in LNBC)
+                bN.CB.Q = -bN.CF.Q;
+        }
+        public void BNZG()                                                              // Neumann Boundary Condition of Zero Gradient
+        {
+            foreach (NBoundary bN in LNBC)
+                bN.CB.Q = bN.CF.Q;
+        }
+
+        public void ICLE(int i1S)                                                       // 〇Initial Condition for Lock-Exchange
+        {
+            for (int i1 = 0; i1 < i1S; i1++)
+                for (int i2 = 0; i2 < N2; i2++)
+                    for (int i3 = 0; i3 < UW; i3++)
+                    {
+                        LC[I(i1, i2, i3)].Q = 0.5;
+                    }
+            for (int i1 = 0; i1 < i1S; i1++) //ana
+                for (int i2 = 0; i2 < N2; i2++)
+                    for (int i3 = UW; i3 < N3; i3++)
+                    {   
+                        if (i1 < LW | i1 > RW)
+                            continue;           
+                        LC[I(i1, i2, i3)].Q = 0.5;
+                    }
+            for (int i1 = i1S; i1 < N1; i1++)
+                for (int i2 = 0; i2 < N2; i2++)
+                    for (int i3 = 0; i3 < UW; i3++)
+                    {
+                        LC[I(i1, i2, i3)].Q = -0.5;
+                    }
+            for (int i1 = i1S; i1 < N1; i1++) //ana
+                for (int i2 = 0; i2 < N2; i2++)
+                    for (int i3 = UW; i3 < N3; i3++)
+                    {
+                        if (i1 < LW | i1 > RW)
+                            continue;
+                        LC[I(i1, i2, i3)].Q = -0.5;
+                    }
+        }
+        
+        public void ICIV(int i1S, int i3H)                                              // Initial Condition for Invation
+        {
+            for (int i1 = 0; i1 < i1S; i1++)
+                for (int i2 = 0; i2 < N2; i2++)
+                    for (int i3 = 0; i3 < N3; i3++)
+                        LC[I(i1, i2, i3)].Q = 0.0;
+            
+            for (int i1 = i1S; i1 < N1; i1++)
+                for (int i2 = 0; i2 < N2; i2++)
+                    for (int i3 = 0; i3 < i3H; i3++)
+                        LC[I(i1, i2, i3)].Q = -0.5;
+            for (int i1 = i1S; i1 < N1; i1++)
+                for (int i2 = 0; i2 < N2; i2++)
+                    for (int i3 = i3H; i3 < N3; i3++)
+                        LC[I(i1, i2, i3)].Q = 0.5;
+        }
+        public void ICRD()                                                              // Initial Condition for Random Disturbance
+        {
+            Random r = new System.Random();
+            foreach (Cell c in LFC)
+                c.Q = (r.NextDouble() - 0.5) * Math.Pow(10, -3);
+        }
+    }
+
+    public class Cell
+    {
+        public double Q;
+        public double B;
+        public Surface S10;
+        public Surface S11;
+        public Surface S20;
+        public Surface S21;
+        public Surface S30;
+        public Surface S31;
+        public Cell C10;
+        public Cell C11;
+        public Cell C20;
+        public Cell C21;
+        public Cell C30;
+        public Cell C31;
+        public Cell CPS;
+        public Cell CU1;
+        public Cell CU2;
+        public Cell CU3;
+        public Cell CFV;
+    }
+
+    public class Surface
+    {
+        public double V;
+        public double F;
+        public double G;
+    }
+
+    public class DBoundary
+    {
+        public Cell CD;
+    }
+
+    public class NBoundary
+    {
+        public Cell CF;
+        public Cell CB;
+    }
+
+    public class TimeKeeper                                                             // Measurement of Computation Time
+    {
+        public DateTime startDateTime;
+        public TimeKeeper()
+        {
+            startDateTime = DateTime.Now;
+        }
+        public string ST()
+        {
+            return DateTime.Now.ToString("G");
+        }
+        public string ET()
+        {
+            return (DateTime.Now - startDateTime).ToString("g");
+        }
+    }
+}
